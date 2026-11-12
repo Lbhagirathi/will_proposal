@@ -1,23 +1,3 @@
-"""
-Minimal ABM for H4: does social information reduce the variability of foraging gain,
-and how does this depend on patch ephemerality?
-
-World      : W x W torus. K resource patches, each disappears with probability 1/L per step
-             (mean lifetime L steps) and reappears at a random location (constant patch number).
-Agents     : N foragers that alternate between searching and feeding.
-Personal   : a searching agent detects a patch within r_sense and heads to it.
-             Otherwise it does a correlated random walk.
-Social     : feeding agents are "callers". A searching agent with no current target hears the
-             nearest caller within R_call with probability q per step (q = information
-             availability). It stores the caller's location and walks to it. The patch may have
-             vanished by the time it arrives (stale information).
-Competition: agents on the same patch share intake: rate / n_on_patch**c  (c = 0: no competition).
-Outcome    : intake per bout of `bout` steps (analogue of one foraging bout / day).
-             Variability = within-agent variance and CV of bout intake; shortfall = share of
-             bouts below a survival threshold.
-
-Run:  python abm_social_info.py          (about 5 minutes)
-"""
 import csv
 import numpy as np
 import matplotlib
@@ -26,13 +6,11 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 def torus_vec(a,b,W):
-    """Shortest vector from a to b on a W x W torus (broadcasts over leading dims)."""
     return(b-a+W/2)%W-W/2
 
 def simulate(q,L,seed,W=100.0,N=20,K=8,r_patch=3.0,r_sense=5.0,R_call=40.0,
              speed=1.0,turn_sd=0.4,c=0.5,rate=1.0,T=4500,bout=200,burn=500,
              position_history=None,patch_history=None):
-    # Fail early on invalid settings instead of silently producing misleading output.
     if not(0.0<=q<=1.0):
         raise ValueError("q must be between 0 and 1.")
     if L<1:
@@ -55,8 +33,6 @@ def simulate(q,L,seed,W=100.0,N=20,K=8,r_patch=3.0,r_sense=5.0,R_call=40.0,
     cur=np.zeros(N)
     out=[]
     for t in range(T):
-        # Burn-in is for equilibration only. Reset accumulated intake exactly when
-        # measurement begins, so the first recorded bout cannot include burn-in.
         if t==burn:
             cur[:]=0.0
 
@@ -78,6 +54,8 @@ def simulate(q,L,seed,W=100.0,N=20,K=8,r_patch=3.0,r_sense=5.0,R_call=40.0,
         target[on]=np.nan
         s=~on # searching agents
 
+        u=rng.random(N)# drawn every step so q does not change the random stream
+
         # social information: feeding agents call, searchers may hear the nearest caller
         if q>0 and on.any():
             callers=pos[on]
@@ -85,7 +63,7 @@ def simulate(q,L,seed,W=100.0,N=20,K=8,r_patch=3.0,r_sense=5.0,R_call=40.0,
             dc=np.hypot(vc[...,0],vc[...,1])
             k=dc.argmin(1)
             hear=(s&np.isnan(target[:,0])&(dc[idx,k]<R_call)
-                    &(rng.random(N)<q))
+                    &(u<q))
             target[hear]=callers[k[hear]]
 
         # heading: personal sensing > stored social target > random walk
@@ -118,12 +96,7 @@ def simulate(q,L,seed,W=100.0,N=20,K=8,r_patch=3.0,r_sense=5.0,R_call=40.0,
     return np.array(out)# (n_bouts, N)
 
 def plot_position_gif(q=0.3,L=80,seed=0,W=100.0,N=20,K=8,T=4500,
-                      show_agents=20,filename="abm_progress_robust.gif",fps=30):
-    """Save an animation with one frame per timestep.
-
-    Note: storing every position and patch location uses O(T * (N + K)) memory.
-    For long runs, reduce T or add a frame_stride before recording history.
-    """
+                      show_agents=20,filename="abm_progress.gif",fps=30):
     positions=[]
     patches=[]
     simulate(q=q,L=L,seed=seed,W=W,N=N,K=K,T=T,
@@ -165,8 +138,7 @@ def plot_position_gif(q=0.3,L=80,seed=0,W=100.0,N=20,K=8,T=4500,
 
 def plot_position_gif_comparison(L_values=(20,80,300,1500),q=0.3,seed=0,
                                 W=100.0,N=20,K=8,T=300,show_agents=20,
-                                filename="abm_progress_cleaned_comparison.gif",fps=20):
-    """Save synchronized position animations for multiple patch lifetimes."""
+                                filename="abm_progress_comparison.gif",fps=20):
     histories=[]
     patch_histories=[]
     for L in L_values:
@@ -179,10 +151,17 @@ def plot_position_gif_comparison(L_values=(20,80,300,1500),q=0.3,seed=0,
 
     n_agents=min(show_agents,N)
     colors=plt.get_cmap("tab20")(np.arange(n_agents))
-    fig,axes=plt.subplots(2,2,figsize=(10,10),constrained_layout=True)
+    n_panels=len(L_values)
+    ncols=min(2,n_panels)
+    nrows=int(np.ceil(n_panels/ncols))
+    fig,axes=plt.subplots(nrows,ncols,figsize=(5*ncols,5*nrows),
+                          constrained_layout=True,squeeze=False)
+    axes=axes.ravel()
+    for ax in axes[n_panels:]:
+        ax.set_visible(False)
     panels=[]
 
-    for ax,L,history,patch_history in zip(axes.flat,L_values,histories,patch_histories):
+    for ax,L,history,patch_history in zip(axes,L_values,histories,patch_histories):
         ax.set_xlim(0,W)
         ax.set_ylim(0,W)
         ax.set_aspect("equal")
@@ -220,12 +199,10 @@ def plot_position_gif_comparison(L_values=(20,80,300,1500),q=0.3,seed=0,
     return filename
 
 def summarise(arr,thr):
-    """Summarise bout intake; return NaN for undefined small/empty samples."""
     arr=np.asarray(arr,dtype=float)
     if arr.size==0 or arr.ndim!=2:
         raise ValueError("arr must be a non-empty 2D array: bouts x agents.")
     mean=float(np.mean(arr))
-    # Estimate within-agent variability across bouts, then average across agents.
     if arr.shape[0]>=2:
         var=float(np.var(arr,axis=0,ddof=1).mean())
     else:
@@ -235,55 +212,42 @@ def summarise(arr,thr):
     return mean,var,cv,short
 
 def analytic_cv(q,L,lam0=0.008,kappa=0.05,tau=25.0,B=200.0):
-    """Renewal-reward approximation (see the LaTeX file).
-    finding rate  lam = lam0 + kappa * q * exp(-tau / L)      (social information gets stale)
-    patch loss    delta = 1 / L
-    CV^2 of bout intake = 2 * delta / (B * lam * (lam + delta))   (valid for B >> 1/lam + 1/delta)
-    Parameters are illustrative, not fitted."""
     lam=lam0+kappa*q*np.exp(-tau/L)
     delta=1.0/L
     return np.sqrt(2*delta/(B*lam*(lam+delta)))
 
-def grid_search_tipping_point(W=100.0,N=20,K=8,L=100,T=4500,burn=500,bout=200):
-    """
-    Coarsely compares social vs silent conditions across competition strengths.
-    This is a grid scan, not an exact tipping-point estimator.
-    """
-    # Define a clean grid of parameters to test
+def grid_search_tipping_point(W=100.0,N=20,K=8,L=100,T=4500,burn=500,bout=200,n_rep=6):
     c_values=[0.0,0.2,0.25,0.4,0.6,1.0]
-    q_values=[0.0,0.2]# Comparing silent vs. social
-    seed=42 # Fixed seed for a fair baseline comparison
+    q_values=[0.0,0.2]
 
     results={}
-
     print("Running parameter sweep across competition intensities...")
-    print(f"Fixed conditions: L={L}, N={N}, K={K}, T={T}\n")
+    print(f"Fixed conditions: L={L}, N={N}, K={K}, T={T}, seeds={n_rep}\n")
 
     for c in c_values:
         results[c]={}
         for q in q_values:
-            # Call your original simulation function
-            out=simulate(q=q,L=L,seed=seed,W=W,N=N,K=K,c=c,T=T,burn=burn,bout=bout)
+            means=[]
+            for seed in range(n_rep):
+                out=simulate(q=q,L=L,seed=seed,W=W,N=N,K=K,c=c,T=T,burn=burn,bout=bout)
+                means.append(summarise(out,thr=0)[0])
+            results[c][q]=np.array(means)
 
-            # Use a dummy threshold of 0 to get the overall mean intake
-            mean_intake,_,_,_=summarise(out,thr=0)
-            results[c][q]=mean_intake
-
-    # Print a structured breakdown of the results
-    print(f"{'Scramble (c)':<15}{'Silent (q=0.0)':<18}{'Social (q=0.2)':<18}{'Net Effect':<15}")
-    print("-"*65)
+    print(f"{'Scramble (c)':<15}{'Silent (q=0.0)':<18}{'Social (q=0.2)':<18}{'Net Effect':<15}{'SE':<10}")
+    print("-"*76)
 
     for c in c_values:
-        mean_silent=results[c][0.0]
-        mean_social=results[c][0.2]
-        net_effect=mean_social-mean_silent
+        diff=results[c][0.2]-results[c][0.0]# paired by seed
+        mean_silent=results[c][0.0].mean()
+        mean_social=results[c][0.2].mean()
+        net_effect=diff.mean()
+        se=diff.std(ddof=1)/np.sqrt(n_rep)
 
-        # Visually tag if sociality is a benefit or a trap
         status="Gain" if net_effect>0 else "Loss"
-        if abs(net_effect)<1.0:
+        if abs(net_effect)<max(1.0,2*se):
             status="Balanced"
 
-        print(f"{c:<15.2f}{mean_silent:<18.1f}{mean_social:<18.1f}{net_effect:<15.1f} {status}")
+        print(f"{c:<15.2f}{mean_silent:<18.1f}{mean_social:<18.1f}{net_effect:<15.1f}{se:<10.1f}{status}")
 
 if __name__=="__main__":
     q_values=[0.0,0.01,0.03,0.1,0.3,1.0]# information availability
@@ -300,15 +264,15 @@ if __name__=="__main__":
             for q in q_values:
                 res=np.array([summarise(simulate(q,L,seed=s,c=c,bout=bout,rate=rate),thr)
                                 for s in range(n_rep)])
-                m=res.mean(0)
-                se=res.std(0,ddof=1)/np.sqrt(n_rep)
+                m=np.nanmean(res,0)
+                se=np.nanstd(res,0,ddof=1)/np.sqrt(np.isfinite(res).sum(0))
                 rows.append([c,L,q,*m,*se])
                 print(f"c={c:.0f} L={L:5d} q={q:5.2f} mean={m[0]:6.1f} var={m[1]:8.1f} "
                       f"CV={m[2]:.3f} shortfall={m[3]:.3f}",flush=True)
 
     header=["c","L","q","mean","var","cv","shortfall",
               "mean_se","var_se","cv_se","shortfall_se"]
-    with open("abm_results_robust.csv","w",newline="")as f:
+    with open("abm_results.csv","w",newline="")as f:
         w=csv.writer(f)
         w.writerow(header)
         w.writerows(rows)
@@ -319,8 +283,6 @@ if __name__=="__main__":
                (5,"Food variability relative to the average"),
                (6,"Chance of a low-food bout")]
     y_labels=["Food per bout","Food variation","Relative variation","Probability of low intake"]
-    # A log axis cannot display q=0. Plot q=0 at a labelled visual placeholder;
-    # the tick label makes clear that it is exactly zero, not q=0.003.
     xs=np.array([0.003 if q==0 else q for q in q_values])
     fig,ax=plt.subplots(2,4,figsize=(16,7),sharex=True)
     for r,(c,clabel)in enumerate(c_values):
@@ -341,7 +303,8 @@ if __name__=="__main__":
         fig.text(0.015,0.69-0.39*r,clabel,ha="left",va="center",fontsize=9)
     ax[0,0].legend(fontsize=8)
     fig.subplots_adjust(left=0.2,bottom=0.13,top=0.9,wspace=0.45,hspace=0.38)
-    plt.savefig("abm_results_cleaned.png",dpi=200)
+    plt.savefig("abm_results.png",dpi=200)
+    plt.close(fig)
 
     # Figure 2: analytic prediction (illustrative parameters)
     qq=np.linspace(0,1,100)
@@ -353,19 +316,18 @@ if __name__=="__main__":
     plt.title("Predicted food variability",fontsize=10)
     plt.legend(fontsize=8)
     plt.tight_layout()
-    plt.savefig("analytic_cv.png",dpi=200)
+    plt.savefig("abm_analytic_cv.png",dpi=200)
     plt.close()
 
     gif_file=plot_position_gif_comparison()
-    print("saved abm_results_robust.csv, abm_results_cleaned.png, analytic_cv.png, {}".format(gif_file))
+    print("saved abm_results.csv, abm_results.png, abm_analytic_cv.png, {}".format(gif_file))
 
-    # Execute the parameter sweep profile
     grid_search_tipping_point(
         W=100.0,
         N=20,
         K=8,
-        L=100,# Dynamic patch lifetime
-        T=4500,# Simulation timeline length
-        burn=500,# Burn-in timeline window
-        bout=200 # Interval slice window
+        L=100,
+        T=4500,
+        burn=500,
+        bout=200
     )
